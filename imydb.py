@@ -9,6 +9,9 @@ class IMYDB:
 
     def load_data(self):
         """Load data from the JSON file or create the file with empty data if it doesn't exist."""
+        dir_path = os.path.dirname(self.file_path)
+        if dir_path and not os.path.exists(dir_path):
+            os.makedirs(dir_path, exist_ok=True)
         if not os.path.exists(self.file_path):
             # If file doesn't exist, create it with an empty dictionary
             print(f"{self.file_path} does not exist, creating new file.")
@@ -28,6 +31,9 @@ class IMYDB:
 
     def save_data(self):
         """Save current data back to the JSON file."""
+        dir_path = os.path.dirname(self.file_path)
+        if dir_path and not os.path.exists(dir_path):
+            os.makedirs(dir_path, exist_ok=True)
         with open(self.file_path, 'w') as f:
             json.dump(self.data, f, indent=4)
 
