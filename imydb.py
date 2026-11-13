@@ -1,91 +1,166 @@
 import json
 import os
+import tempfile
+from pathlib import Path
+from typing import Any
+
+
+_MISSING = object()
+
 
 class IMYDB:
-    def __init__(self, file_path):
-        self.file_path = file_path
-        self.data = {}  # Initialize self.data to an empty dictionary
-        self.load_data()  # Load the data after initializing self.data
+    """A lightweight JSON-based key-value database with nested keys."""
 
-    def load_data(self):
-        """Load data from the JSON file or create the file with empty data if it doesn't exist."""
-        dir_path = os.path.dirname(self.file_path)
-        if dir_path and not os.path.exists(dir_path):
-            os.makedirs(dir_path, exist_ok=True)
-        if not os.path.exists(self.file_path):
-            # If file doesn't exist, create it with an empty dictionary
-            print(f"{self.file_path} does not exist, creating new file.")
-            self.save_data()  # Save an empty dictionary to create the file
-        else:
-            with open(self.file_path, 'r') as f:
-                content = f.read().strip()
-                if content:  # File is not empty
-                    try:
-                        self.data = json.loads(content)  # Try to load the JSON
-                    except json.JSONDecodeError:
-                        print(f"Warning: Invalid JSON in {self.file_path}, initializing with empty data.")
-                        self.data = {}  # Initialize with an empty dictionary if JSON is invalid
-                else:
-                    print(f"Warning: {self.file_path} is empty, initializing with empty data.")
-                    self.data = {}  # Initialize with an empty dictionary if the file is empty
+    def __init__(self, file_path: str | os.PathLike):
+        self.file_path = Path(file_path)
+        self.data: dict[str, Any] = {}
+        self.load_data()
 
-    def save_data(self):
-        """Save current data back to the JSON file."""
-        dir_path = os.path.dirname(self.file_path)
-        if dir_path and not os.path.exists(dir_path):
-            os.makedirs(dir_path, exist_ok=True)
-        with open(self.file_path, 'w') as f:
-            json.dump(self.data, f, indent=4)
+    def load_data(self) -> None:
+        """Load the database, creating it if it doesn't exist."""
+        self.file_path.parent.mkdir(parents=True, exist_ok=True)
 
-    def set(self, key, value):
-        """Set a key-value pair in the data."""
-        self._set_nested(self.data, key.split('.'), value)
+        try:
+            with self.file_path.open("r", encoding="utf-8") as file:
+                data = json.load(file)
+        except FileNotFoundError:
+            self.save_data()
+            return
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"Invalid JSON in database file: {self.file_path}"
+            ) from exc
+
+        if not isinstance(data, dict):
+            raise ValueError("Database root must be a JSON object.")
+
+        self.data = data
+
+    def save_data(self) -> None:
+        """Atomically save the database to disk."""
+        self.file_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = None
+
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=self.file_path.parent,
+                prefix=f".{self.file_path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as file:
+                temp_path = Path(file.name)
+
+                json.dump(self.data, file, indent=4, ensure_ascii=False)
+                file.write("\n")
+                file.flush()
+                os.fsync(file.fileno())
+
+            os.replace(temp_path, self.file_path)
+
+        finally:
+            if temp_path and temp_path.exists():
+                temp_path.unlink()
+
+    @staticmethod
+    def _split_key(key: str) -> list[str]:
+        """Validate and split a dotted key."""
+        if not isinstance(key, str) or not key:
+            raise ValueError("Key must be a non-empty string.")
+
+        parts = key.split(".")
+
+        if any(not part for part in parts):
+            raise ValueError(f"Invalid nested key: {key!r}")
+
+        return parts
+
+    @staticmethod
+    def _get_nested(
+        data: dict,
+        keys: list[str],
+        default: Any = None,
+    ) -> Any:
+        """Retrieve a value from a nested dictionary."""
+        current = data
+
+        for key in keys:
+            if not isinstance(current, dict) or key not in current:
+                return default
+
+            current = current[key]
+
+        return current
+
+    @staticmethod
+    def _set_nested(
+        data: dict,
+        keys: list[str],
+        value: Any,
+    ) -> None:
+        """Set a value inside a nested dictionary."""
+        current = data
+
+        for key in keys[:-1]:
+            if key not in current:
+                current[key] = {}
+
+            if not isinstance(current[key], dict):
+                raise TypeError(
+                    f"Cannot traverse '{key}': expected a dictionary."
+                )
+
+            current = current[key]
+
+        current[keys[-1]] = value
+
+    @staticmethod
+    def _delete_nested(data: dict, keys: list[str]) -> bool:
+        """Delete a nested value. Returns whether it existed."""
+        current = data
+
+        for key in keys[:-1]:
+            if not isinstance(current, dict) or key not in current:
+                return False
+
+            current = current[key]
+
+        if not isinstance(current, dict):
+            return False
+
+        return current.pop(keys[-1], _MISSING) is not _MISSING
+
+    def set(self, key: str, value: Any) -> None:
+        """Set or create a key-value pair."""
+        keys = self._split_key(key)
+        self._set_nested(self.data, keys, value)
         self.save_data()
 
-    def get(self, key, default=None):
-        """Get a value by key, or return default if key is not found."""
-        return self._get_nested(self.data, key.split('.'), default)
+    def get(self, key: str, default: Any = None) -> Any:
+        """Retrieve a value, returning default when the key is missing."""
+        keys = self._split_key(key)
+        return self._get_nested(self.data, keys, default)
 
-    def delete(self, key):
-        """Delete a key-value pair."""
-        self._delete_nested(self.data, key.split('.'))
+    def exists(self, key: str) -> bool:
+        """Check whether a key exists, even if its value is None."""
+        keys = self._split_key(key)
+        return self._get_nested(self.data, keys, _MISSING) is not _MISSING
+
+    def delete(self, key: str) -> bool:
+        """Delete a key. Returns whether anything was deleted."""
+        keys = self._split_key(key)
+
+        if not self._delete_nested(self.data, keys):
+            return False
+
         self.save_data()
+        return True
 
-    def update(self, key, value):
-        """Update the value of an existing key."""
-        if self.exists(key):
-            self.set(key, value)
+    def update(self, key: str, value: Any) -> bool:
+        """Update an existing key without creating a new one."""
+        if not self.exists(key):
+            return False
 
-    def exists(self, key):
-        """Check if the key exists in the data."""
-        return self._get_nested(self.data, key.split('.'), default=None) is not None
-
-    # Helper methods for handling nested structures
-
-    def _set_nested(self, data, keys, value):
-        """Set a value in a nested structure."""
-        key = keys[0]
-        if len(keys) == 1:
-            data[key] = value
-        else:
-            if key not in data:
-                data[key] = {}
-            self._set_nested(data[key], keys[1:], value)
-
-    def _get_nested(self, data, keys, default=None):
-        """Get a value from a nested structure."""
-        key = keys[0]
-        if len(keys) == 1:
-            return data.get(key, default)
-        elif key in data:
-            return self._get_nested(data[key], keys[1:], default)
-        return default
-
-    def _delete_nested(self, data, keys):
-        """Delete a key-value pair in a nested structure."""
-        key = keys[0]
-        if len(keys) == 1:
-            if key in data:
-                del data[key]
-        elif key in data:
-            self._delete_nested(data[key], keys[1:])
+        self.set(key, value)
+        return True
